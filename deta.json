@@ -1,0 +1,6 @@
+{
+  "name": "ALL_IN_1TOOLS_BOT",
+  "runtime": "python3.11",
+  "entrypoint": "python3 main.py",
+  "project": "telegram-bot"
+}

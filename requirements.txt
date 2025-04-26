@@ -1,0 +1,7 @@
+pip install python-telegram-bot==20.8
+pip install flask
+pip install rembg
+pip install Pillow
+pip install qrcode
+pip install requests
+pip install pyshorteners
