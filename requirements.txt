@@ -1,5 +1,8 @@
 python-telegram-bot==20.8
-pillow
+flask
 requests
+Pillow
 rembg
 qrcode
+transformers
+torch
