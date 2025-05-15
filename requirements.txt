@@ -1,9 +1,8 @@
-python-telegram-bot==13.7
-Pillow==9.0.1
-requests==2.27.1
-qrcode==7.3.1
-googletrans==4.0.0-rc1
-forex-python==1.16
-faker==13.3.4
-beautifulsoup4==4.11.1
-python-dotenv==0.19.2
+python-telegram-bot
+requests
+qrcode[pil]
+Pillow
+pyzbar
+pyshorteners
+yt-dlp
+removebg
