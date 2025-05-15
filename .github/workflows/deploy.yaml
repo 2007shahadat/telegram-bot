@@ -1,19 +1,37 @@
-name: Run Telegram Bot 24/7
+name: Run Telegram Bot
 
 on:
-  push:
-    branches: [main]
+  push: 
+    branches:
+      - main 
+  schedule:
+    - cron: '*/15 * * * *' # Runs every 15 minutes
+  workflow_dispatch: 
 
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest 
+    timeout-minutes: 10 
+
     steps:
-      - uses: actions/checkout@v3
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run bot
-        run: python bot.py
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10' 
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        # Ensure ffmpeg is available (usually is on GitHub runners)
+        # sudo apt-get update && sudo apt-get install -y ffmpeg # If needed
+
+    - name: Run bot
+      # If using GitHub Secrets, you would define them here:
+      # env:
+      #   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      #   REMOVEBG_API_KEY: ${{ secrets.REMOVEBG_API_KEY }}
+      run: python bot.py
