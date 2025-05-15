@@ -1,682 +1,690 @@
-import os
 import logging
-import requests
-from PIL import Image, ImageDraw, ImageFont
-from io import BytesIO
-import qrcode
-from googletrans import Translator
-from forex_python.converter import CurrencyRates
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
-from faker import Faker
-import json
-from bs4 import BeautifulSoup
-import textwrap
-import time
+import os
 import random
-from dotenv import load_dotenv
+import string
+import requests
+from io import BytesIO
 
-# Load environment variables
-load_dotenv()
+# Telegram
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-# Configure logging
+# QR Code
+import qrcode
+from pyzbar.pyzbar import decode as qr_decode
+
+# Image Processing
+from PIL import Image
+
+# URL Shortener
+from pyshorteners import Shortener
+
+# YouTube Downloader (and others)
+import yt_dlp
+
+# Remove Background
+from removebg import RemoveBg # pip install removebg
+
+# --- Configuration ---
+# WARNING: Hardcoding API keys is a security risk if your code is public.
+# Consider using environment variables or GitHub Secrets for production.
+TELEGRAM_BOT_TOKEN = "7959962751:AAFg5M7qfFxYgjUTAdg-KIK6k6JFZuMemJI" # YOUR_BOT_TOKEN
+REMOVEBG_API_KEY = "qLfRtLd6MebVzGTuFcQ7Yv9j" # YOUR_REMOVEBG_API_KEY
+
+DICTIONARY_API_URL = "https://api.dictionaryapi.dev/api/v2/entries/en/"
+CURRENCY_API_URL_FRANKFURTER = "https://api.frankfurter.app"
+
+
+# --- Logging Setup ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Bot Token and API Keys
-TOKEN = "7754654122:AAFGTvgsF-NjzYKgVVfmZvZjR_FHGvcrlDQ"
-REMOVE_BG_API_KEY = "qLfRtLd6MebVzGTuFcQ7Yv9j"
+# --- Global Variables (for simple state, e.g., TicTacToe - will reset on restart) ---
+ttt_games = {} # chat_id: {board: [], player_turn: 'X', game_over: False}
 
-# Initialize various tools
-translator = Translator()
-currency_converter = CurrencyRates()
-fake = Faker()
+# --- Helper Functions ---
+def generate_password(length=12):
+    characters = string.ascii_letters + string.digits + string.punctuation
+    password = ''.join(random.choice(characters) for i in range(length))
+    return password
 
-# Processing animation messages
-PROCESSING_MESSAGES = [
-    "Processing your request...",
-    "Working on it...",
-    "Almost there...",
-    "Just a moment...",
-    "Magic in progress...",
-    "Crunching data...",
-    "Generating awesomeness..."
-]
-
-def send_processing_message(update: Update, context: CallbackContext) -> None:
-    """Send a processing message with animation."""
-    message = update.message.reply_text(random.choice(PROCESSING_MESSAGES))
-    context.user_data['processing_message'] = message
-    return message
-
-def update_processing_message(context: CallbackContext, message, text=None) -> None:
-    """Update the processing message with animation."""
-    if not text:
-        text = random.choice(PROCESSING_MESSAGES)
+def get_random_fact():
     try:
-        context.bot.edit_message_text(
-            chat_id=message.chat_id,
-            message_id=message.message_id,
-            text=text
-        )
-    except:
-        pass
+        response = requests.get("https://uselessfacts.jsph.pl/random.json?language=en")
+        response.raise_for_status()
+        return response.json()['text']
+    except Exception as e:
+        logger.error(f"Error fetching fact: {e}")
+        return "Sorry, couldn't fetch a fact right now."
 
-def remove_processing_message(context: CallbackContext, message) -> None:
-    """Remove the processing message."""
+def get_random_joke():
     try:
-        context.bot.delete_message(
-            chat_id=message.chat_id,
-            message_id=message.message_id
-        )
-    except:
-        pass
+        headers = {'Accept': 'application/json'}
+        response = requests.get("https://icanhazdadjoke.com/", headers=headers)
+        response.raise_for_status()
+        return response.json()['joke']
+    except Exception as e:
+        logger.error(f"Error fetching joke: {e}")
+        return "Sorry, couldn't fetch a joke right now."
 
-def start(update: Update, context: CallbackContext) -> None:
-    """Send a welcome message with tool selection buttons."""
-    keyboard = [
-        [InlineKeyboardButton("🖼️ Remove Background", callback_data='remove_bg')],
-        [InlineKeyboardButton("📄 Image to PDF", callback_data='img_to_pdf')],
-        [InlineKeyboardButton("🎨 Text to Image", callback_data='text_to_img')],
-        [InlineKeyboardButton("📉 Compress Image", callback_data='compress_img')],
-        [InlineKeyboardButton("🔳 QR Code Generator", callback_data='qr_code')],
-        [InlineKeyboardButton("🌍 Translator", callback_data='translator')],
-        [InlineKeyboardButton("💱 Currency Converter", callback_data='currency')],
-        [InlineKeyboardButton("🖼️ Image Upscaler", callback_data='upscale')],
-        [InlineKeyboardButton("📝 Text Summarizer", callback_data='summarize')],
-        [InlineKeyboardButton("😂 Random Joke", callback_data='joke')],
-        [InlineKeyboardButton("🌤️ Weather Info", callback_data='weather')],
-        [InlineKeyboardButton("🎭 Cartoonify Image", callback_data='cartoonify')],
-        [InlineKeyboardButton("📺 YouTube Thumbnail", callback_data='yt_thumb')],
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    welcome_message = """
-    🤖 Welcome to Multi-Feature Bot! 🤖
+# --- Command Handlers ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_html(
+        rf"Hi {user.mention_html()}! I am your friendly utility bot."
+        "\nUse /help to see what I can do.",
+    )
 
-    Select a tool from the buttons below:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+    Available commands:
+    /start - Welcome message
+    /help - This help message
+
+    🔍 *Search & Info*
+    /dict <word> - Get definition of a word.
+    /fact - Get a random fact.
+    /joke - Get a random joke.
+
+    💰 *Converters*
+    /currency <amount> <FROM_CODE> <TO_CODE> - Convert currency (e.g., /currency 10 USD EUR).
+    (Unit Converter to be added)
+
+    🛠️ *Utilities*
+    /password [length] - Generate a strong password (default length 12).
+    /qr <text> - Generate a QR code for the text.
+    /shorten <url> - Shorten a long URL.
+    /unshorten <short_url> - Get the original URL from a shortened one.
+    (Send an image with a QR code to scan it)
+
+    🖼️ *Image Tools*
+    /removebg - Reply to an image to remove its background.
+    /resize <width> <height> - Reply to an image to resize it.
+    /compress <quality> - Reply to an image to compress it (quality 0-100).
+
+    📥 *Downloaders* (May be unreliable)
+    /yt <video_url> [audio|video] - Download YouTube content (default video).
+    /insta <post_url> - Download Instagram post/reel/story.
+    /fb <video_url> - Download Facebook video.
+    /tiktok <video_url> - Download TikTok video.
+
+    📦 *Telegram Stickers*
+    Send me a sticker, and I'll try to download it for you.
+    
+    🕹️ *Games*
+    /tictactoe - Start a game of Tic Tac Toe. (Very Basic)
     """
-    update.message.reply_text(welcome_message, reply_markup=reply_markup)
+    # Removed for now: /unit <value> <from_unit> <to_unit> - Convert units.
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
-def button_handler(update: Update, context: CallbackContext) -> None:
-    """Handle button callbacks."""
-    query = update.callback_query
-    query.answer()
-    
-    tool_instructions = {
-        'remove_bg': "Send me an image to remove the background.",
-        'img_to_pdf': "Send me images to convert to PDF. Send /done when finished.",
-        'text_to_img': "Send me text to convert to an image (e.g., 'Hello World').",
-        'compress_img': "Send me an image to compress.",
-        'qr_code': "Send me text to generate a QR code (e.g., 'https://example.com').",
-        'translator': "Send text to translate in format: 'text to language_code' (e.g., 'hello to es').",
-        'currency': "Send amount to convert in format: 'amount from_currency to_currency' (e.g., '100 USD EUR').",
-        'upscale': "Send me an image to upscale.",
-        'summarize': "Send me text to summarize.",
-        'joke': "Here's your joke:",
-        'weather': "Send me a city name to get weather info.",
-        'cartoonify': "Send me an image to cartoonify.",
-        'yt_thumb': "Send me a YouTube URL to get the thumbnail.",
-    }
-    
-    if query.data in tool_instructions:
-        if query.data == 'joke':
-            # Directly send a joke
-            joke = fake.sentence()
-            query.edit_message_text(f"😂 Here's a joke for you:\n\nWhy did the {fake.word()} cross the road?\nTo {fake.word()} the {fake.word()}!")
-        else:
-            query.edit_message_text(f"🛠️ {tool_instructions[query.data]}\n\nSend /cancel to go back.")
-            context.user_data['current_tool'] = query.data
-
-def remove_background(update: Update, context: CallbackContext) -> None:
-    """Remove background from an image."""
-    processing_msg = send_processing_message(update, context)
-    
-    try:
-        photo = update.message.photo[-1].get_file()
-        image_data = BytesIO()
-        photo.download(out=image_data)
-        image_data.seek(0)
-        
-        update_processing_message(context, processing_msg, "Removing background...")
-        
-        response = requests.post(
-            'https://api.remove.bg/v1.0/removebg',
-            files={'image_file': image_data},
-            data={'size': 'auto'},
-            headers={'X-Api-Key': REMOVE_BG_API_KEY}
-        )
-        
-        if response.status_code == requests.codes.ok:
-            output_image = BytesIO(response.content)
-            output_image.name = 'no-bg.png'
-            remove_processing_message(context, processing_msg)
-            update.message.reply_document(
-                document=InputFile(output_image, filename='no-bg.png'),
-                caption="✅ Background removed successfully!"
-            )
-        else:
-            remove_processing_message(context, processing_msg)
-            update.message.reply_text(f"❌ Error: {response.status_code} {response.text}")
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ An error occurred: {str(e)}")
-
-def images_to_pdf(update: Update, context: CallbackContext) -> None:
-    """Convert multiple images to a single PDF."""
-    if not context.user_data.get('pdf_images'):
-        context.user_data['pdf_images'] = []
-        update.message.reply_text("📄 Please send me the images you want to convert to PDF. Send /done when finished.")
-        return
-    
-    if update.message.photo:
-        processing_msg = send_processing_message(update, context)
-        
-        try:
-            photo = update.message.photo[-1].get_file()
-            image_data = BytesIO()
-            photo.download(out=image_data)
-            image_data.seek(0)
-            
-            update_processing_message(context, processing_msg, "Processing image...")
-            
-            img = Image.open(image_data)
-            if img.mode == 'RGBA':
-                img = img.convert('RGB')
-            context.user_data['pdf_images'].append(img)
-            
-            remove_processing_message(context, processing_msg)
-            update.message.reply_text(f"✅ Image received. {len(context.user_data['pdf_images'])} images collected. Send more or /done to create PDF.")
-        except Exception as e:
-            remove_processing_message(context, processing_msg)
-            update.message.reply_text(f"❌ Error processing image: {str(e)}")
-    elif update.message.text and update.message.text.lower() == '/done':
-        if not context.user_data['pdf_images']:
-            update.message.reply_text("❌ No images received to create PDF.")
-            return
-        
-        processing_msg = send_processing_message(update, context)
-        update_processing_message(context, processing_msg, "Creating PDF...")
-        
-        try:
-            pdf_buffer = BytesIO()
-            context.user_data['pdf_images'][0].save(
-                pdf_buffer,
-                "PDF",
-                save_all=True,
-                append_images=context.user_data['pdf_images'][1:]
-            )
-            pdf_buffer.seek(0)
-            
-            remove_processing_message(context, processing_msg)
-            update.message.reply_document(
-                document=InputFile(pdf_buffer, filename='converted.pdf'),
-                caption="✅ PDF created successfully!"
-            )
-        except Exception as e:
-            remove_processing_message(context, processing_msg)
-            update.message.reply_text(f"❌ Error creating PDF: {str(e)}")
-        finally:
-            context.user_data['pdf_images'] = []
-    else:
-        update.message.reply_text("Please send images or /done to finish.")
-
-def text_to_image(update: Update, context: CallbackContext) -> None:
-    """Convert text to image using AI."""
+async def dictionary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        update.message.reply_text("❌ Please provide text after the command. Example: /texttoimage Hello World")
+        await update.message.reply_text("Please provide a word. Usage: /dict <word>")
         return
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Generating image...")
-    
-    text = ' '.join(context.args)
+    word = context.args[0]
     try:
-        # Create a blank image
-        img = Image.new('RGB', (800, 400), color=(73, 109, 137))
-        d = ImageDraw.Draw(img)
-        
-        # Try to use a nice font
-        try:
-            font = ImageFont.truetype("arial.ttf", 40)
-        except:
-            font = ImageFont.load_default()
-        
-        # Wrap text
-        lines = textwrap.wrap(text, width=30)
-        y_text = 50
-        for line in lines:
-            width, height = font.getsize(line)
-            d.text(((800 - width) / 2, y_text), line, font=font, fill=(255, 255, 0))
-            y_text += height + 10
-        
-        # Save to buffer
-        img_buffer = BytesIO()
-        img.save(img_buffer, format='PNG')
-        img_buffer.seek(0)
-        
-        remove_processing_message(context, processing_msg)
-        update.message.reply_photo(
-            photo=InputFile(img_buffer, filename='text_image.png'),
-            caption="✅ Text to image conversion complete!"
-        )
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error generating image: {str(e)}")
+        response = requests.get(f"{DICTIONARY_API_URL}{word}")
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict) and data.get('title') == "No Definitions Found":
+             await update.message.reply_text(f"Sorry, no definitions found for '{word}'.")
+             return
 
-def compress_image(update: Update, context: CallbackContext) -> None:
-    """Compress an image."""
-    if not update.message.photo:
-        update.message.reply_text("❌ Please send an image to compress.")
-        return
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Compressing image...")
-    
-    photo = update.message.photo[-1].get_file()
-    image_data = BytesIO()
-    photo.download(out=image_data)
-    image_data.seek(0)
-    
-    try:
-        img = Image.open(image_data)
-        # Compress the image
-        compressed_buffer = BytesIO()
-        img.save(compressed_buffer, format='JPEG', quality=50)
-        compressed_buffer.seek(0)
-        
-        remove_processing_message(context, processing_msg)
-        update.message.reply_document(
-            document=InputFile(compressed_buffer, filename='compressed.jpg'),
-            caption="✅ Image compressed successfully!"
-        )
+        meanings = data[0]['meanings']
+        reply = f"Definitions for *{word}*:\n\n"
+        for meaning in meanings:
+            reply += f"*{meaning['partOfSpeech']}*:\n"
+            for i, definition in enumerate(meaning['definitions'][:3]): # Max 3 definitions per part of speech
+                reply += f"  {i+1}. {definition['definition']}\n"
+                if 'example' in definition:
+                    reply += f"     _Example: {definition['example']}_\n"
+            reply += "\n"
+        await update.message.reply_text(reply, parse_mode='Markdown')
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            await update.message.reply_text(f"Sorry, no definitions found for '{word}'.")
+        else:
+            await update.message.reply_text("Sorry, there was an error fetching the definition.")
+            logger.error(f"Dictionary API error for {word}: {e}")
     except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error compressing image: {str(e)}")
+        await update.message.reply_text("Sorry, an error occurred.")
+        logger.error(f"Error in dictionary_command for {word}: {e}")
 
-def generate_qrcode(update: Update, context: CallbackContext) -> None:
-    """Generate a QR code from text."""
-    if not context.args:
-        update.message.reply_text("❌ Please provide text after the command. Example: /qrcode https://example.com")
+async def currency_converter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 3:
+        await update.message.reply_text("Usage: /currency <amount> <FROM_CURRENCY_CODE> <TO_CURRENCY_CODE>\nExample: /currency 10 USD EUR")
         return
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Generating QR code...")
-    
-    text = ' '.join(context.args)
-    try:
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=10,
-            border=4,
-        )
-        qr.add_data(text)
-        qr.make(fit=True)
-        
-        img = qr.make_image(fill_color="black", back_color="white")
-        
-        # Save to buffer
-        img_buffer = BytesIO()
-        img.save(img_buffer, format='PNG')
-        img_buffer.seek(0)
-        
-        remove_processing_message(context, processing_msg)
-        update.message.reply_photo(
-            photo=InputFile(img_buffer, filename='qrcode.png'),
-            caption="✅ QR code generated successfully!"
-        )
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error generating QR code: {str(e)}")
 
-def translate_text(update: Update, context: CallbackContext) -> None:
-    """Translate text to another language."""
-    if not context.args or 'to' not in context.args:
-        update.message.reply_text("❌ Usage: /translate text to language_code\nExample: /translate hello to es")
-        return
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Translating text...")
-    
-    try:
-        to_index = context.args.index('to')
-        text = ' '.join(context.args[:to_index])
-        dest_lang = context.args[to_index + 1] if to_index + 1 < len(context.args) else 'en'
-        
-        translation = translator.translate(text, dest=dest_lang)
-        
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(
-            f"✅ Translation ({translation.src} -> {translation.dest}):\n\n"
-            f"Original: {text}\n"
-            f"Translation: {translation.text}"
-        )
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error translating: {str(e)}")
-
-def convert_currency(update: Update, context: CallbackContext) -> None:
-    """Convert currency from one to another."""
-    if len(context.args) < 3 or context.args[1].lower() != 'from' or context.args[3].lower() != 'to':
-        update.message.reply_text("❌ Usage: /convert amount from currency to currency\nExample: /convert 100 from USD to EUR")
-        return
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Converting currency...")
-    
     try:
         amount = float(context.args[0])
-        from_currency = context.args[2].upper()
-        to_currency = context.args[4].upper()
-        
-        rate = currency_converter.get_rate(from_currency, to_currency)
-        converted = amount * rate
-        
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(
-            f"✅ Currency Conversion:\n\n"
-            f"{amount} {from_currency} = {converted:.2f} {to_currency}\n"
-            f"Rate: 1 {from_currency} = {rate:.4f} {to_currency}"
-        )
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error converting currency: {str(e)}\nMake sure to use valid currency codes.")
-
-def upscale_image(update: Update, context: CallbackContext) -> None:
-    """Upscale an image."""
-    if not update.message.photo:
-        update.message.reply_text("❌ Please send an image to upscale.")
+    except ValueError:
+        await update.message.reply_text("Invalid amount. Please enter a number.")
         return
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Upscaling image...")
-    
-    try:
-        photo = update.message.photo[-1].get_file()
-        image_data = BytesIO()
-        photo.download(out=image_data)
-        image_data.seek(0)
-        
-        # This is a placeholder - in a real app you'd use an API
-        img = Image.open(image_data)
-        upscaled_buffer = BytesIO()
-        img.save(upscaled_buffer, format='PNG')
-        upscaled_buffer.seek(0)
-        
-        remove_processing_message(context, processing_msg)
-        update.message.reply_document(
-            document=InputFile(upscaled_buffer, filename='upscaled.png'),
-            caption="✅ Image upscaling complete!"
-        )
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error upscaling image: {str(e)}")
 
-def summarize_text(update: Update, context: CallbackContext) -> None:
-    """Summarize text."""
+    from_currency = context.args[1].upper()
+    to_currency = context.args[2].upper()
+
+    if from_currency == to_currency:
+        await update.message.reply_text(f"{amount} {from_currency} is {amount} {to_currency}")
+        return
+
+    try:
+        # Using Frankfurter API (no key needed)
+        url = f"{CURRENCY_API_URL_FRANKFURTER}/latest?amount={amount}&from={from_currency}&to={to_currency}"
+        response = requests.get(url)
+        response.raise_for_status()  # Raises an exception for bad status codes (4xx or 5xx)
+        data = response.json()
+
+        if 'rates' in data and to_currency in data['rates']:
+            converted_amount = data['rates'][to_currency]
+            await update.message.reply_text(f"{amount} {from_currency} is approximately {converted_amount:.2f} {to_currency}\n_Rates from {data.get('date', 'latest')}_", parse_mode='Markdown')
+        else:
+            # Check if currencies are supported by listing them if error
+            all_currencies_res = requests.get(f"{CURRENCY_API_URL_FRANKFURTER}/currencies")
+            all_currencies_data = all_currencies_res.json()
+            supported_codes = ", ".join(all_currencies_data.keys())
+            await update.message.reply_text(f"Could not convert from {from_currency} to {to_currency}. "
+                                            f"Ensure the currency codes are valid.\n"
+                                            f"Supported codes include: {supported_codes[:200]}...") # Show some supported codes
+    except requests.exceptions.HTTPError as e:
+        error_data = e.response.json()
+        error_message = error_data.get('message', 'Unknown error from currency API.')
+        logger.error(f"Currency API HTTPError: {e} - {error_message}")
+        await update.message.reply_text(f"Error from currency service: {error_message}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Currency API RequestException: {e}")
+        await update.message.reply_text("Sorry, there was an error connecting to the currency conversion service.")
+    except Exception as e:
+        logger.error(f"Error in currency_converter_command: {e}")
+        await update.message.reply_text("An unexpected error occurred during currency conversion.")
+
+
+async def fact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(get_random_fact())
+
+async def joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(get_random_joke())
+
+async def password_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    length = 12
+    if context.args and context.args[0].isdigit():
+        length = int(context.args[0])
+        if not (8 <= length <= 64):
+            await update.message.reply_text("Password length must be between 8 and 64.")
+            return
+    password = generate_password(length)
+    await update.message.reply_text(f"Generated password: `{password}`", parse_mode='Markdown')
+
+async def qr_generator_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        update.message.reply_text("❌ Please provide text after the command. Example: /summarize long text here")
+        await update.message.reply_text("Please provide text to encode. Usage: /qr <text>")
         return
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Summarizing text...")
-    
-    text = ' '.join(context.args)
-    try:
-        # Simple summarization - in a real app you'd use an NLP library
-        sentences = text.split('.')
-        summary = '. '.join(sentences[:2]) + '.' if len(sentences) > 2 else text
-        
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(
-            f"✅ Summary:\n\n{summary}\n\n"
-            f"Original length: {len(text.split())} words\n"
-            f"Summary length: {len(summary.split())} words"
-        )
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error summarizing text: {str(e)}")
+    text = " ".join(context.args)
+    img = qrcode.make(text)
+    bio = BytesIO()
+    bio.name = 'qr_code.png'
+    img.save(bio, 'PNG')
+    bio.seek(0)
+    await update.message.reply_photo(photo=bio)
 
-def random_joke(update: Update, context: CallbackContext) -> None:
-    """Generate a random joke."""
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Generating joke...")
-    
-    try:
-        joke = fake.sentence()
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(
-            f"😂 Here's a joke for you:\n\n"
-            f"Why did the {fake.word()} cross the road?\n"
-            f"To {fake.word()} the {fake.word()}!"
-        )
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error generating joke: {str(e)}")
-
-def random_joke_bangla(update: Update, context: CallbackContext) -> None:
-    """Generate a random Bangla joke."""
-    jokes = [
-        "একটা মুরগি রাস্তা পার হচ্ছিল, পুলিশ জিজ্ঞেস করল, 'কোথায় যাও?' মুরগি বলল, 'বিয়ে করতে!' পুলিশ বলল, 'এত তাড়াতাড়ি?' মুরগি বলল, 'হ্যাঁ, বর তো আজকে ফ্রি!'",
-        "এক ছেলে বাবার কাছে গিয়ে বলল, 'বাবা, আমি একটা বিজ্ঞানী হতে চাই!' বাবা বলল, 'কেন?' ছেলে বলল, 'কারণ বিজ্ঞানীরা সবসময় ল্যাবে থাকে, আর আমি ল্যাবে থাকতে পছন্দ করি!' বাবা বলল, 'তুমি তো সবসময় ল্যাবে (লেবু) খাও!'",
-        "একটা বাচ্চা মাছ মাকে জিজ্ঞেস করল, 'মা, আমাদের বাসা কোথায়?' মা মাছ বলল, 'জলে!' বাচ্চা মাছ বলল, 'কিন্তু মা, সবই তো জল!'"
-    ]
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Generating Bangla joke...")
-    
-    try:
-        joke = random.choice(jokes)
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"😂 বাংলা জোক:\n\n{joke}")
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error generating Bangla joke: {str(e)}")
-
-def get_weather(update: Update, context: CallbackContext) -> None:
-    """Get weather information for a city."""
+async def url_shortener_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        update.message.reply_text("❌ Please specify a city. Example: /weather London")
+        await update.message.reply_text("Please provide a URL to shorten. Usage: /shorten <url>")
         return
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Fetching weather data...")
-    
-    city = ' '.join(context.args)
+    url_to_shorten = context.args[0]
     try:
-        # Placeholder - in a real app you'd use a weather API
-        weather_data = {
-            'city': city,
-            'temperature': random.randint(15, 35),
-            'condition': random.choice(['Sunny', 'Cloudy', 'Rainy', 'Partly Cloudy']),
-            'humidity': random.randint(30, 90)
-        }
-        
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(
-            f"⛅ Weather in {weather_data['city']}:\n\n"
-            f"🌡️ Temperature: {weather_data['temperature']}°C\n"
-            f"☁️ Condition: {weather_data['condition']}\n"
-            f"💧 Humidity: {weather_data['humidity']}%"
-        )
+        s = Shortener()
+        short_url = s.tinyurl.short(url_to_shorten)
+        await update.message.reply_text(f"Shortened URL: {short_url}")
     except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error getting weather: {str(e)}")
+        logger.error(f"Error shortening URL {url_to_shorten}: {e}")
+        await update.message.reply_text("Sorry, could not shorten the URL. Make sure it's valid.")
 
-def cartoonify_image(update: Update, context: CallbackContext) -> None:
-    """Cartoonify an image."""
-    if not update.message.photo:
-        update.message.reply_text("❌ Please send an image to cartoonify.")
-        return
-    
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Cartoonifying image...")
-    
-    try:
-        photo = update.message.photo[-1].get_file()
-        image_data = BytesIO()
-        photo.download(out=image_data)
-        image_data.seek(0)
-        
-        # Placeholder - in a real app you'd use an image processing API
-        img = Image.open(image_data)
-        cartoon_buffer = BytesIO()
-        img.save(cartoon_buffer, format='PNG')
-        cartoon_buffer.seek(0)
-        
-        remove_processing_message(context, processing_msg)
-        update.message.reply_document(
-            document=InputFile(cartoon_buffer, filename='cartoonified.png'),
-            caption="✅ Image cartoonified successfully!"
-        )
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error cartoonifying image: {str(e)}")
-
-def youtube_thumbnail(update: Update, context: CallbackContext) -> None:
-    """Download YouTube thumbnail."""
+async def url_unshortener_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        update.message.reply_text("❌ Please provide a YouTube URL. Example: /ytthumb https://youtube.com/watch?v=...")
+        await update.message.reply_text("Please provide a short URL to unshorten. Usage: /unshorten <url>")
         return
+    short_url = context.args[0]
+    try:
+        response = requests.head(short_url, allow_redirects=True, timeout=10) # Increased timeout
+        original_url = response.url
+        await update.message.reply_text(f"Original URL: {original_url}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error unshortening URL {short_url}: {e}")
+        await update.message.reply_text("Sorry, could not unshorten the URL. It might be invalid, unreachable, or timed out.")
+
+# --- Message Handlers (for images, stickers etc.) ---
+
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
     
-    processing_msg = send_processing_message(update, context)
-    update_processing_message(context, processing_msg, "Fetching thumbnail...")
+    # QR Code Scanner
+    if not message.caption or not (message.caption.lower().startswith(('/resize', '/compress', '/removebg'))):
+        file_id = message.photo[-1].file_id
+        new_file = await context.bot.get_file(file_id)
+        img_bytes = BytesIO(await new_file.download_as_bytearray())
+        img_bytes.seek(0)
+        
+        try:
+            img = Image.open(img_bytes)
+            decoded_objects = qr_decode(img)
+            if decoded_objects:
+                qr_data = [obj.data.decode('utf-8') for obj in decoded_objects]
+                await message.reply_text("QR Code(s) found:\n" + "\n".join(qr_data))
+                return 
+        except Exception as e:
+            logger.error(f"Error decoding QR from image: {e}")
+
+    # Image Manipulation (if command is in caption)
+    if message.caption:
+        command_parts = message.caption.split()
+        command = command_parts[0].lower()
+
+        if command == "/removebg":
+            if not REMOVEBG_API_KEY:
+                await message.reply_text("RemoveBG API key is not configured. This feature is unavailable.")
+                return
+            
+            await message.reply_chat_action("upload_photo")
+            file_id = message.photo[-1].file_id
+            new_file = await context.bot.get_file(file_id)
+            img_bytes = BytesIO(await new_file.download_as_bytearray())
+            
+            temp_input_filename = f"temp_input_{message.message_id}.png"
+            temp_output_filename = f"no_bg_{message.message_id}.png"
+
+            try:
+                r = RemoveBg(REMOVEBG_API_KEY, f"removebg_error_{message.message_id}.log")
+                with open(temp_input_filename, "wb") as temp_f:
+                    temp_f.write(img_bytes.getvalue())
+
+                r.remove_background_from_img_file(img_path=temp_input_filename, new_file_name=temp_output_filename)
+
+                with open(temp_output_filename, "rb") as processed_image_file:
+                    await message.reply_photo(photo=processed_image_file, caption="Background removed!")
+            except Exception as e:
+                logger.error(f"Error removing background: {e}")
+                await message.reply_text(f"Sorry, couldn't remove background. Error: {str(e)[:200]}") # Send part of error
+            finally:
+                if os.path.exists(temp_input_filename):
+                    os.remove(temp_input_filename)
+                if os.path.exists(temp_output_filename):
+                    os.remove(temp_output_filename)
+                if os.path.exists(f"removebg_error_{message.message_id}.log"):
+                     os.remove(f"removebg_error_{message.message_id}.log")
+            return
+
+
+        if command == "/resize" and len(command_parts) == 3 and command_parts[1].isdigit() and command_parts[2].isdigit():
+            width = int(command_parts[1])
+            height = int(command_parts[2])
+            
+            if not (10 < width < 4096 and 10 < height < 4096):
+                await message.reply_text("Width and height must be between 10 and 4096.")
+                return
+
+            await message.reply_chat_action("upload_photo")
+            file_id = message.photo[-1].file_id
+            new_file = await context.bot.get_file(file_id)
+            img_bytes = BytesIO(await new_file.download_as_bytearray())
+            
+            try:
+                img = Image.open(img_bytes)
+                img_resized = img.resize((width, height))
+                
+                bio_resized = BytesIO()
+                bio_resized.name = 'resized_image.png' 
+                img_format = img.format if img.format else 'PNG'
+                img_resized.save(bio_resized, img_format)
+                bio_resized.seek(0)
+                await message.reply_photo(photo=bio_resized, caption=f"Resized to {width}x{height}")
+            except Exception as e:
+                logger.error(f"Error resizing image: {e}")
+                await message.reply_text("Sorry, could not resize the image.")
+            return
+
+        if command == "/compress" and len(command_parts) == 2 and command_parts[1].isdigit():
+            quality = int(command_parts[1])
+            if not (0 <= quality <= 100):
+                await message.reply_text("Quality must be between 0 and 100.")
+                return
+
+            await message.reply_chat_action("upload_photo")
+            file_id = message.photo[-1].file_id
+            new_file = await context.bot.get_file(file_id)
+            img_bytes = BytesIO(await new_file.download_as_bytearray())
+
+            try:
+                img = Image.open(img_bytes)
+                bio_compressed = BytesIO()
+                bio_compressed.name = 'compressed_image.jpg' 
+                
+                if img.mode == 'RGBA' or img.mode == 'P': # Handle palette mode too
+                    img = img.convert('RGB')
+                    
+                img.save(bio_compressed, "JPEG", quality=quality, optimize=True) # Added optimize
+                bio_compressed.seek(0)
+                await message.reply_photo(photo=bio_compressed, caption=f"Compressed with quality {quality}")
+            except Exception as e:
+                logger.error(f"Error compressing image: {e}")
+                await message.reply_text("Sorry, could not compress the image. Try ensuring it's a common format like PNG or JPG.")
+            return
+
+
+async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sticker = update.message.sticker
+    await update.message.reply_text(f"Sticker received! File ID: `{sticker.file_id}`", parse_mode='Markdown')
     
+    if sticker.is_animated or sticker.is_video:
+        ext = ".tgs" if sticker.is_animated else ".webm" 
+    else:
+        ext = ".webp" 
+
+    try:
+        await update.message.reply_chat_action("upload_document")
+        sticker_file = await context.bot.get_file(sticker.file_id)
+        
+        downloaded_sticker_bytes = BytesIO(await sticker_file.download_as_bytearray())
+        downloaded_sticker_bytes.name = f"sticker_{sticker.file_unique_id}{ext}"
+        downloaded_sticker_bytes.seek(0)
+
+        await update.message.reply_document(document=downloaded_sticker_bytes,
+                                            caption=f"Here's the sticker file ({ext})!")
+    except Exception as e:
+        logger.error(f"Error downloading/sending sticker {sticker.file_id}: {e}")
+        await update.message.reply_text("Sorry, I couldn't download that sticker.")
+
+
+# --- Downloaders ---
+async def downloader_command(update: Update, context: ContextTypes.DEFAULT_TYPE, platform: str):
+    if not context.args:
+        await update.message.reply_text(f"Please provide a URL. Usage: /{platform.lower()} <url> [audio|video]")
+        return
+
     url = context.args[0]
-    try:
-        # Extract video ID
-        if 'v=' in url:
-            video_id = url.split('v=')[1].split('&')[0]
-        else:
-            video_id = url.split('/')[-1]
-        
-        # Get highest resolution thumbnail
-        thumbnail_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
-        
-        # Download the thumbnail
-        response = requests.get(thumbnail_url)
-        if response.status_code == 200:
-            remove_processing_message(context, processing_msg)
-            update.message.reply_photo(
-                photo=thumbnail_url,
-                caption="✅ YouTube thumbnail downloaded!"
-            )
-        else:
-            # Try lower resolution if maxresdefault doesn't exist
-            thumbnail_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
-            response = requests.get(thumbnail_url)
-            if response.status_code == 200:
-                remove_processing_message(context, processing_msg)
-                update.message.reply_photo(
-                    photo=thumbnail_url,
-                    caption="✅ YouTube thumbnail downloaded!"
-                )
-            else:
-                remove_processing_message(context, processing_msg)
-                update.message.reply_text("❌ Could not retrieve thumbnail for this video.")
-    except Exception as e:
-        remove_processing_message(context, processing_msg)
-        update.message.reply_text(f"❌ Error downloading thumbnail: {str(e)}")
+    output_format = 'video' 
+    if len(context.args) > 1 and context.args[1].lower() == 'audio':
+        output_format = 'audio'
 
-def cancel(update: Update, context: CallbackContext) -> None:
-    """Cancel the current operation."""
-    if 'pdf_images' in context.user_data:
-        context.user_data['pdf_images'] = []
-    if 'current_tool' in context.user_data:
-        del context.user_data['current_tool']
+    processing_msg = await update.message.reply_text(f"Trying to download {output_format} from {platform}... this might take a while.")
+    await update.message.reply_chat_action("upload_video" if output_format == "video" else "upload_audio")
+
+    # Unique filename per request to avoid conflicts in stateless environment
+    request_id = update.update_id 
+    base_filename = f"{platform}_{request_id}"
     
-    update.message.reply_text("❌ Operation cancelled. What would you like to do next?", reply_markup=get_main_menu())
+    # yt-dlp output template - ensuring unique names
+    # %(title).20s might create too long filenames or problematic chars, use id
+    output_template = f"{base_filename}_%(id)s.%(ext)s"
 
-def get_main_menu():
-    """Return the main menu keyboard."""
-    keyboard = [
-        [InlineKeyboardButton("🖼️ Remove Background", callback_data='remove_bg')],
-        [InlineKeyboardButton("📄 Image to PDF", callback_data='img_to_pdf')],
-        [InlineKeyboardButton("🎨 Text to Image", callback_data='text_to_img')],
-        [InlineKeyboardButton("📉 Compress Image", callback_data='compress_img')],
-        [InlineKeyboardButton("🔳 QR Code Generator", callback_data='qr_code')],
-        [InlineKeyboardButton("🌍 Translator", callback_data='translator')],
-        [InlineKeyboardButton("💱 Currency Converter", callback_data='currency')],
-        [InlineKeyboardButton("🖼️ Image Upscaler", callback_data='upscale')],
-        [InlineKeyboardButton("📝 Text Summarizer", callback_data='summarize')],
-        [InlineKeyboardButton("😂 Random Joke", callback_data='joke')],
-        [InlineKeyboardButton("🌤️ Weather Info", callback_data='weather')],
-        [InlineKeyboardButton("🎭 Cartoonify Image", callback_data='cartoonify')],
-        [InlineKeyboardButton("📺 YouTube Thumbnail", callback_data='yt_thumb')],
-    ]
+
+    ydl_opts_video = {
+        'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best[height<=1080]/best', # Limit height
+        'outtmpl': output_template,
+        'noplaylist': True,
+        'max_filesize': 48 * 1024 * 1024, # Slightly under 50MB to be safe
+        'quiet': True, 
+        'no_warnings': True,
+        'socket_timeout': 30, # Timeout for network operations
+        'retries': 2, # Retry failed downloads
+        # 'ffmpeg_location': '/usr/bin/ffmpeg', # Explicitly set if needed on runner
+    }
+    ydl_opts_audio = {
+        'format': 'bestaudio[ext=m4a]/bestaudio/best', # m4a is often better quality and size than mp3
+        'outtmpl': output_template,
+        'noplaylist': True,
+        'max_filesize': 48 * 1024 * 1024,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'm4a', # Defaulting to m4a
+            'preferredquality': '128', # 128k for audio is a good balance
+        }],
+        'quiet': True,
+        'no_warnings': True,
+        'socket_timeout': 30,
+        'retries': 2,
+        # 'ffmpeg_location': '/usr/bin/ffmpeg',
+    }
+    if output_format == 'audio' and context.args[1].lower() == 'mp3': # Allow user to request mp3
+        ydl_opts_audio['postprocessors'][0]['preferredcodec'] = 'mp3'
+    
+    ydl_opts = ydl_opts_video if output_format == 'video' else ydl_opts_audio
+
+    downloaded_filepath = None
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False) 
+            
+            # Check filesize from info if available *before* download
+            filesize_est = info.get('filesize') or info.get('filesize_approx')
+            if filesize_est and filesize_est > 48 * 1024 * 1024:
+                await processing_msg.edit_text(f"The file is estimated to be too large ({filesize_est // (1024*1024)}MB) to send via Telegram (max ~48MB). Cannot download.")
+                return
+
+            await processing_msg.edit_text(f"Downloading and processing '{info.get('title', url)}'...")
+            ydl.download([url])
+            
+            # Determine the actual downloaded filename
+            # yt-dlp might change the extension based on postprocessing
+            # We used a base_filename pattern, so we can find it
+            for f_name in os.listdir('.'):
+                if f_name.startswith(base_filename) and os.path.isfile(f_name):
+                    downloaded_filepath = f_name
+                    break
+            
+            if not downloaded_filepath or not os.path.exists(downloaded_filepath):
+                logger.error(f"Downloaded file not found for {url} with base {base_filename}.")
+                await processing_msg.edit_text("Sorry, couldn't find the downloaded file after processing.")
+                return
+
+        file_size_on_disk = os.path.getsize(downloaded_filepath)
+        if file_size_on_disk > 50 * 1024 * 1024: # Final check
+            await processing_msg.edit_text(f"Downloaded file '{downloaded_filepath}' is too large ({file_size_on_disk//(1024*1024)}MB) to send via Telegram.")
+            return # Cleanup will happen in finally
+
+        # Send the file
+        with open(downloaded_filepath, 'rb') as f:
+            caption_text = info.get('title', os.path.basename(downloaded_filepath))
+            if output_format == 'video':
+                await update.message.reply_video(video=f, caption=caption_text,
+                                                 width=info.get('width'), height=info.get('height'),
+                                                 duration=info.get('duration'))
+            else: # audio
+                await update.message.reply_audio(audio=f, caption=caption_text,
+                                                 title=info.get('track') or info.get('title'),
+                                                 performer=info.get('artist') or info.get('uploader'),
+                                                 duration=info.get('duration'))
+        await processing_msg.delete() # Clean up "processing" message
+
+    except yt_dlp.utils.MaxFilesizeError:
+        logger.warning(f"MaxFilesizeError for {url} ({platform})")
+        await processing_msg.edit_text(f"Sorry, the file from {platform} is too large to download (limit set to ~48MB for Telegram).")
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"yt-dlp DownloadError for {url} ({platform}): {e}")
+        # Try to give a more user-friendly message for common errors
+        if "Unsupported URL" in str(e):
+            error_msg_user = f"The URL for {platform} is not supported or is invalid."
+        elif "private" in str(e).lower() or "login required" in str(e).lower():
+            error_msg_user = f"This {platform} content might be private or require login."
+        else:
+            error_msg_user = f"Sorry, couldn't download from {platform}. The platform might be blocking downloads or the URL is problematic."
+        await processing_msg.edit_text(error_msg_user + f"\n_{str(e)[:150]}_", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Generic error in {platform} downloader for {url}: {e}")
+        await processing_msg.edit_text(f"An unexpected error occurred while trying to download from {platform}.")
+    finally:
+        if downloaded_filepath and os.path.exists(downloaded_filepath):
+            os.remove(downloaded_filepath)
+        # Clean up any other potential temp files from yt-dlp if pattern is known (less reliable)
+        for f_name in os.listdir('.'):
+            if f_name.startswith(base_filename): # Clean any file starting with our unique base name
+                try:
+                    os.remove(f_name)
+                except OSError: # File might have been moved or already deleted
+                    pass
+
+
+async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await downloader_command(update, context, "YouTube")
+
+async def instagram_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await downloader_command(update, context, "Instagram")
+
+async def facebook_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await downloader_command(update, context, "Facebook")
+
+async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await downloader_command(update, context, "TikTok")
+
+
+# --- Tic Tac Toe (Very Basic - state will be lost on GitHub Action restarts) ---
+def get_ttt_board_markup(chat_id):
+    game = ttt_games.get(chat_id)
+    if not game:
+        return None
+    
+    board = game['board']
+    keyboard = []
+    for i in range(0, 9, 3):
+        row = [
+            InlineKeyboardButton(board[i] or " ", callback_data=f"ttt_{i}"),
+            InlineKeyboardButton(board[i+1] or " ", callback_data=f"ttt_{i+1}"),
+            InlineKeyboardButton(board[i+2] or " ", callback_data=f"ttt_{i+2}")
+        ]
+        keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
-def message_handler(update: Update, context: CallbackContext) -> None:
-    """Handle regular messages based on the current tool."""
-    if 'current_tool' not in context.user_data:
-        update.message.reply_text("Please select a tool from the menu.", reply_markup=get_main_menu())
-        return
-    
-    current_tool = context.user_data['current_tool']
-    
-    if current_tool == 'remove_bg':
-        remove_background(update, context)
-    elif current_tool == 'img_to_pdf':
-        images_to_pdf(update, context)
-    elif current_tool == 'text_to_img':
-        text_to_image(update, context)
-    elif current_tool == 'compress_img':
-        compress_image(update, context)
-    elif current_tool == 'qr_code':
-        generate_qrcode(update, context)
-    elif current_tool == 'translator':
-        translate_text(update, context)
-    elif current_tool == 'currency':
-        convert_currency(update, context)
-    elif current_tool == 'upscale':
-        upscale_image(update, context)
-    elif current_tool == 'summarize':
-        summarize_text(update, context)
-    elif current_tool == 'joke':
-        random_joke(update, context)
-    elif current_tool == 'weather':
-        get_weather(update, context)
-    elif current_tool == 'cartoonify':
-        cartoonify_image(update, context)
-    elif current_tool == 'yt_thumb':
-        youtube_thumbnail(update, context)
-    else:
-        update.message.reply_text("Invalid tool selected. Please try again.", reply_markup=get_main_menu())
+def check_ttt_winner(board):
+    lines = [
+        [0, 1, 2], [3, 4, 5], [6, 7, 8],  # Horizontal
+        [0, 3, 6], [1, 4, 7], [2, 5, 8],  # Vertical
+        [0, 4, 8], [2, 4, 6]             # Diagonal
+    ]
+    for line in lines:
+        if board[line[0]] and board[line[0]] == board[line[1]] == board[line[2]]:
+            return board[line[0]]
+    if all(cell for cell in board):
+        return "Draw"
+    return None
 
-def error_handler(update: Update, context: CallbackContext) -> None:
-    """Log errors."""
-    logger.error(f"Update {update} caused error {context.error}")
-    if update and update.message:
-        update.message.reply_text("❌ An error occurred. Please try again.")
+async def tictactoe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id in ttt_games and not ttt_games[chat_id]['game_over']:
+        await update.message.reply_text("A game is already in progress!", reply_markup=get_ttt_board_markup(chat_id))
+        return
+
+    ttt_games[chat_id] = {'board': [None] * 9, 'player_turn': 'X', 'game_over': False, 'message_id': None}
+    markup = get_ttt_board_markup(chat_id)
+    msg = await update.message.reply_text("Tic Tac Toe! Player X's turn.", reply_markup=markup)
+    ttt_games[chat_id]['message_id'] = msg.message_id
+
+async def tictactoe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer() # Acknowledge callback
+    chat_id = query.message.chat_id
+
+    if chat_id not in ttt_games or ttt_games[chat_id]['game_over']:
+        try:
+            await query.edit_message_text(text="Game is over or not started. Use /tictactoe to start a new game.")
+        except Exception: # Message might have been deleted or too old
+            pass
+        return
+
+    game = ttt_games[chat_id]
+    try:
+        cell_index = int(query.data.split('_')[1])
+    except (ValueError, IndexError):
+        logger.error(f"Invalid callback data for TTT: {query.data}")
+        return
+
+    if game['board'][cell_index] is not None:
+        await context.bot.answer_callback_query(query.id, text="Cell already taken!", show_alert=True)
+        return
+
+    game['board'][cell_index] = game['player_turn']
+    winner = check_ttt_winner(game['board'])
+
+    if winner:
+        game['game_over'] = True
+        text = f"Game Over! Winner is {winner}." if winner != "Draw" else "Game Over! It's a Draw."
+        try:
+            await query.edit_message_text(text=text, reply_markup=None) # Remove board on game over
+        except Exception:
+            pass
+        if chat_id in ttt_games: # Clean up game state
+            del ttt_games[chat_id] 
+    else:
+        game['player_turn'] = 'O' if game['player_turn'] == 'X' else 'X'
+        text = f"Player {game['player_turn']}'s turn."
+        markup = get_ttt_board_markup(chat_id)
+        try:
+            await query.edit_message_text(text=text, reply_markup=markup)
+        except Exception: # Message might be too old to edit
+            pass
+
+
+# --- Error Handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+    # More detailed error logging
+    if context.error:
+        tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+        tb_string = "".join(tb_list)
+        logger.error(f"Traceback:\n{tb_string}")
+
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("Sorry, an internal error occurred.")
+        except Exception as e:
+            logger.error(f"Error sending error message to user: {e}")
+
 
 def main() -> None:
     """Start the bot."""
-    updater = Updater(TOKEN)
-    dispatcher = updater.dispatcher
+    if not TELEGRAM_BOT_TOKEN:
+        logger.critical("TELEGRAM_BOT_TOKEN is not set!")
+        return
+    if not REMOVEBG_API_KEY:
+        logger.warning("REMOVEBG_API_KEY is not set! /removebg feature will not work.")
+
+
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Command handlers
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("cancel", cancel))
-    dispatcher.add_handler(CommandHandler("jokebn", random_joke_bangla))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("dict", dictionary_command))
+    application.add_handler(CommandHandler("currency", currency_converter_command))
+    application.add_handler(CommandHandler("fact", fact_command))
+    application.add_handler(CommandHandler("joke", joke_command))
+    application.add_handler(CommandHandler("password", password_command))
+    application.add_handler(CommandHandler("qr", qr_generator_command))
+    application.add_handler(CommandHandler("shorten", url_shortener_command))
+    application.add_handler(CommandHandler("unshorten", url_unshortener_command))
     
-    # Button handler
-    dispatcher.add_handler(CallbackQueryHandler(button_handler))
-    
-    # Message handler
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler))
-    dispatcher.add_handler(MessageHandler(Filters.photo, message_handler))
-    
+    application.add_handler(CommandHandler("yt", youtube_command))
+    application.add_handler(CommandHandler("insta", instagram_command))
+    application.add_handler(CommandHandler("fb", facebook_command))
+    application.add_handler(CommandHandler("tiktok", tiktok_command))
+
+    application.add_handler(CommandHandler("tictactoe", tictactoe_command))
+    application.add_handler(CallbackQueryHandler(tictactoe_callback, pattern="^ttt_"))
+
+    # Message handlers
+    # Handle photos with commands in caption for image tools, otherwise try QR scan
+    application.add_handler(MessageHandler(filters.PHOTO, handle_image))
+    application.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
+
     # Error handler
-    dispatcher.add_error_handler(error_handler)
+    import traceback # for more detailed error logging
+    application.add_error_handler(error_handler)
 
     # Start the Bot
-    updater.start_polling()
-    updater.idle()
+    logger.info("Starting bot polling...")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
