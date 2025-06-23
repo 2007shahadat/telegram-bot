@@ -1,8 +1,2 @@
-python-telegram-bot
-requests
-qrcode[pil]
-Pillow
-pyzbar
-pyshorteners
-yt-dlp
-removebg
+python-telegram-bot==20.6
+python-dotenv==1.0.0
