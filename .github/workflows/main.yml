@@ -3,40 +3,32 @@ name: Run Telegram Bot
 on:
   push:
     branches:
-      - main # Or master, or your default branch
+      - main
   schedule:
-    # Runs a job at specific UTC times using POSIX cron syntax.
-    # This will try to restart the bot every 15 minutes.
-    # Be mindful of GitHub Actions usage limits.
-    - cron: '*/15 * * * *'
-  workflow_dispatch: # Allows manual triggering from the Actions tab
+    - cron: '*/15 * * * *'  # Runs every 15 minutes
+  workflow_dispatch:
 
 jobs:
   run-bot:
-    runs-on: ubuntu-latest # Use the latest Ubuntu runner
-    timeout-minutes: 10 # Set a timeout for the job to prevent it from running too long if bot hangs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up Python
+    - name: Set up Python 3.10
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10' # Choose a Python version
+        python-version: '3.10'
 
     - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y libzbar0 zbar-tools  # Install ZBar library
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        # For yt-dlp, ensure ffmpeg is available (usually is on GitHub runners)
-        # sudo apt-get install -y ffmpeg # If needed, but often pre-installed
+        pip install python-telegram-bot
+        pip install python-dotenv  # Optional but recommended
 
     - name: Run bot
-      # If you were using GitHub Secrets, they would be here:
-      # env:
-      #   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      #   REMOVEBG_API_KEY: ${{ secrets.REMOVEBG_API_KEY }}
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}  # Use GitHub Secrets for security
       run: python bot.py
